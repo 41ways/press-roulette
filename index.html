@@ -154,7 +154,7 @@
   </section>
 </div>
 
-<script src="engine.js"></script>
+<script src="engine.js?v=2"></script>
 <script>
 (function () {
   "use strict";
@@ -468,16 +468,17 @@
       ctx.globalAlpha = 1;
     }
 
-    // 공
-    var n = sim.n, x = sim.x, y = sim.y, r = sim.r, col = sim.col;
+    // 공. 물리는 1/360초씩 걸으니 화면 프레임과 어긋난 만큼 직전 걸음과 섞어 그린다
+    var n = sim.n, x = sim.x, y = sim.y, ox = sim.ox, oy = sim.oy, r = sim.r, col = sim.col;
+    var al = sim.alpha, bl = 1 - al;
     for (i = 0; i < n; i++) {
-      var rr = r[i];
-      if (y[i] - rr > VY0 + VH || x[i] + rr < 0 || x[i] - rr > 1000) continue;
-      ctx.drawImage(sprites[col[i]], x[i] - rr, y[i] - rr, rr * 2, rr * 2);
+      var rr = r[i], dx = x[i] * al + ox[i] * bl, dy = y[i] * al + oy[i] * bl;
+      if (dy - rr > VY0 + VH || dx + rr < 0 || dx - rr > 1000) continue;
+      ctx.drawImage(sprites[col[i]], dx - rr, dy - rr, rr * 2, rr * 2);
     }
 
     // 프레스
-    var PX = sim.PX, PW = sim.PW, PTH = sim.PTH, T = sim.T, py = sim.piston.y;
+    var PX = sim.PX, PW = sim.PW, PTH = sim.PTH, T = sim.T, py = sim.piston.y * al + sim.piston.py * bl;
     var gr = ctx.createLinearGradient(PX - 20, 0, PX + 20, 0);
     gr.addColorStop(0, "#5d6573"); gr.addColorStop(.45, "#c9ced8"); gr.addColorStop(1, "#4a515e");
     ctx.fillStyle = gr;
