@@ -18,17 +18,19 @@
     SHRINK: 0.72,    // 눌리면 반지름이 이만큼으로
     G: 1600,         // 중력
     HZ: 360,         // 물리 걸음 수(초당)
-    CRUSH: 0.25,     // 프레스에 반지름의 이만큼 이상 파고들면 터짐
+    CRUSH: 0.12,     // 프레스에 반지름의 이만큼 이상 파고들면 터짐
     GHOST: 1400,     // 나뉜 공이 판 밑에서 빠져나가는 속도
     EXITV: 500,      // 판 밖으로 빠져나온 뒤 남기는 옆 속도
     BUD: 0.75,       // 나뉜 공이 처음 태어날 때 크기(제 크기 대비)
     GROW: 0.1,       // 판 밖으로 나온 뒤 제 크기로 부푸는 시간(초)
-    SQUIRT: 0.6,     // 그래도 갓 나뉜 공이 판 밑에 깔리면 판 바깥쪽으로 짜내는 세기
-    STOP: 0.25,      // 그러고도 이만큼 눌리면 프레스가 올라간다(터지는 깊이와 같게)
+    DIG: 150,        // 한 번 누를 때 처음 터뜨린 뒤로 이만큼만 더 내려가고 돌아선다
+    DIGT: 1,         // 처음 터뜨린 뒤로 이만큼(초) 지나면 덜 내려갔어도 돌아선다
+    TOUCH: 0.05,     // 프레스가 돌아설 때 이만큼이라도 눌려 있던 공은 다 터진다
+    WAITMAX: 0.05,   // 빠져나가는 공을 기다리는 최대 시간(초)
     VMAX: 1000,      // 공 최고 속도
-    VDOWN: 820,
+    VDOWN: 650,
     VUP: 1100,
-    RESTT: 0.08,
+    RESTT: 0.3,
     HOLDT: 0.05,
     FILL: 0.6,       // 상자 넓이 대비 공 넓이가 이만큼이면 펑
     CAP: 2600,
@@ -79,7 +81,7 @@
     var head = new Int32Array(GW * GH), next = new Int32Array(CAP);
 
     var DT = 1 / C.HZ, acc = 0;
-    var P = { y: REST, py: REST, phase: "wait", t: 0, stroke: 0, flash: 0 };
+    var P = { y: REST, py: REST, phase: "wait", t: 0, stroke: 0, flash: 0, wait: false, waitT: 0, dig: -1, digT: 0 };
     var sim = {
       W: W, H: H, POLY: POLY, PX: PX, PW: PW, PTH: PTH, ROD: ROD, T: T, B: B, FL: FL, FR: FR,
       x: x, y: y, ox: ox, oy: oy, r: r, col: col, counts: counts, piston: P,
@@ -128,16 +130,19 @@
       remove(i);
       var rc = Math.max(C.MINR, Rr * C.SHRINK), r0 = rc * C.BUD;
       // 판 가장자리에서 눌린 공은 셋 다 가까운 바깥쪽으로, 안쪽이면 양옆으로 갈라 보낸다
-      var gy = Y + Rr - r0, s0 = rnd() < 0.5 ? -1 : 1, edge = PW / 2 - Rr;
+      // 판 바닥보다 아래로 낳는다(판과 겹쳐 그려지면 눌렸는데 안 나뉜 공처럼 보인다)
+      var gy = Math.max(Y + Rr - r0, P.y + PTH + r0 + 0.5), s0 = rnd() < 0.5 ? -1 : 1, edge = PW / 2 - Rr;
       var side = X < PX - edge ? -1 : X > PX + edge ? 1 : 0;
       for (var k = 0; k < 3; k++) {
         var d = side || (k === 0 ? -1 : k === 1 ? 1 : s0), sp = C.GHOST * (0.85 + rnd() * 0.3);
         // 같은 쪽으로 가는 공끼리 한데 겹쳐 빠져나오지 않게 속도를 다르게
-        if (side) sp *= 0.5 + k * 0.25; else if (k === 2) sp *= 0.55;
+        if (side) sp *= 0.6 + k * 0.2; else if (k === 2) sp *= 0.7;
         var j = add(X + d * r0 * 0.5, gy - k * 0.01, rc, cc, P.stroke, d * sp, 0, r0);
         if (j >= 0) ghost[j] = 1;
       }
+      P.wait = true;
       sim.crushes++;
+      if (P.dig < 0) { P.dig = P.y; P.digT = 0; }
       P.flash = 1;
       if (sim.onCrush) sim.onCrush(X, Y, Rr, cc);
     }
@@ -164,18 +169,39 @@
       x[i] = x1 + br; return dr + br;
     }
 
+    // 판 밑면에 파고든 깊이(벽과 다른 공에 밀려 다시 판 밑으로 들어온 만큼)
+    function overPlate(i) {
+      var br = r[i], x0 = PX - PW / 2, x1 = PX + PW / 2, py1 = P.y + PTH;
+      if (y[i] < P.y || x[i] < x0 - br * 0.5 || x[i] > x1 + br * 0.5) return 0;
+      var qx = x[i] < x0 ? x0 : x[i] > x1 ? x1 : x[i];
+      var ddx = x[i] - qx, ddy = y[i] - py1;
+      return br - Math.sqrt(ddx * ddx + (ddy > 0 ? ddy * ddy : 0));
+    }
+
+    // 프레스가 돌아선다. 그때 판에 닿아 눌려 있던 공은 덜 눌렸어도 마저 터뜨린다
+    // (안 그러면 살짝 눌렸다 풀린 공이 눌렸는데 안 나뉜 공으로 보인다)
+    function turn() {
+      for (var i = n - 1; i >= 0; i--) {
+        if (ghost[i] || born[i] >= P.stroke || n >= C.CAP) continue;
+        if (overPlate(i) > C.TOUCH * r[i]) crush(i);
+      }
+      P.phase = "up"; P.t = 0;
+    }
+
     function stepPiston(h) {
       if (P.phase === "wait") return;
       P.flash = Math.max(0, P.flash - h * 4);
       if (P.phase === "rest") {
         P.t += h;
-        if (P.t >= C.RESTT) { P.phase = "down"; P.t = 0; P.stroke++; }
+        if (P.t >= C.RESTT) { P.phase = "down"; P.t = 0; P.stroke++; P.dig = -1; }
       } else if (P.phase === "down") {
-        P.y += C.VDOWN * h;
+        // 판 밑에서 빠져나가는 공이 있으면 다 나갈 때까지 그 자리에서 기다린다
+        if (!P.wait) P.y += C.VDOWN * h;
         if (P.y >= YMAX) { P.y = YMAX; P.phase = "hold"; P.t = 0; }
+        else if (P.dig >= 0 && ((P.y >= P.dig + C.DIG && !P.wait) || (P.digT += h) > C.DIGT)) turn();
       } else if (P.phase === "hold") {
-        P.t += h;
-        if (P.t >= C.HOLDT) { P.phase = "up"; P.t = 0; }
+        if (!P.wait) P.t += h;
+        if (P.t >= C.HOLDT) turn();
       } else if (P.phase === "up") {
         P.y -= C.VUP * h;
         if (P.y <= REST) { P.y = REST; P.phase = "rest"; P.t = 0; }
@@ -200,13 +226,18 @@
       var x0 = PX - PW / 2, x1 = PX + PW / 2, py0 = P.y, py1 = P.y + PTH;
       var up = P.phase === "up" || P.phase === "rest";
       // 프레스
+      var ghosts = 0;
       for (i = 0; i < n; i++) {
         if (ghost[i]) {
-          // 중심이 판 끝을 지나면 보통 공으로. 비탈에 부딪혀 솟구치지 않게 옆 속도만 조금 남긴다
+          // 판 밖으로 다 빠져나가면 보통 공으로. 비탈에 부딪혀 솟구치지 않게 옆 속도만 조금 남긴다
           if (x[i] < x0 || x[i] > x1) {
             ghost[i] = 0;
             ox[i] = x[i] - (x[i] < PX ? -1 : 1) * C.EXITV * h;
             oy[i] = y[i] - Math.max(0, y[i] - oy[i]);
+          } else {
+            if (y[i] < py1 + r[i]) { y[i] = py1 + r[i]; if (oy[i] > y[i]) oy[i] = y[i]; }
+            // 판 바로 밑에 붙어 있는 것만 기다린다(더미 속으로 빠져 내려간 공은 판이 안 닿는다)
+            if (y[i] - r[i] < py1 + 6) ghosts++;
           }
           continue;
         }
@@ -271,27 +302,33 @@
         if (u2 > vmax * vmax) { var us = vmax / Math.sqrt(u2); ox[i] = x[i] - ux * us; oy[i] = y[i] - uy * us; }
       }
 
-      // 눌림 판정: 벽과 다른 공에 밀려 다시 판 밑으로 파고든 깊이.
-      // 이번에 갓 나뉜 공은 또 나뉘지 않는다(안 그러면 한 번에 바닥까지 끝없이 나뉜다).
-      // 예전엔 그런 공도 판이 그대로 눌러 납작하게 만들었다. 이제는 판 바깥쪽으로 짜내고,
-      // 그래도 끼어서 눌리면 프레스가 올라간다.
+      // 이번에 갓 나뉜 공(빠져나가는 중이든 아니든)이 바닥·비탈에 받쳐 판과 겹치면
+      // 판이 그만큼 물러난다. 못 나뉘는 공을 밀고 들어가 납작하게 만들지 않는다
+      var back = 0;
       if (P.phase === "down" || P.phase === "hold") {
-        var stuck = false;
+        for (i = 0; i < n; i++) if (born[i] >= P.stroke) { var go = overPlate(i); if (go > back) back = go; }
+      }
+      if (back > 0) { P.y = Math.max(REST, P.y - back); py0 = P.y; py1 = P.y + PTH; }
+
+      // 빠져나가는 공이 판 밑에 있으면 프레스가 기다린다(너무 오래 걸리면 그냥 간다)
+      P.waitT = ghosts ? P.waitT + h : 0;
+      P.wait = ghosts > 0 && P.waitT < C.WAITMAX;
+
+      // 눌림 판정. 이번에 갓 나뉜 공은 또 나뉘지 않는다(안 그러면 한 번에 바닥까지 끝없이 나뉜다).
+      // 그런 공이 다시 판 밑에 들어와 닿으면 판 밑으로 내려 보내 다시 옆으로 빠져나가게 한다.
+      if (P.phase === "down" || P.phase === "hold") {
         for (i = n - 1; i >= 0; i--) {
-          var br = r[i];
-          if (y[i] < py1 - br * 0.3 || x[i] < x0 - br * 0.5 || x[i] > x1 + br * 0.5) continue;
-          var qx = x[i] < x0 ? x0 : x[i] > x1 ? x1 : x[i];
-          var ddx = x[i] - qx, ddy = y[i] - py1;
-          var over = br - Math.sqrt(ddx * ddx + (ddy > 0 ? ddy * ddy : 0));
-          if (over <= 0 || ghost[i]) continue;
+          if (ghost[i]) continue;
+          var br = r[i], over = overPlate(i);
+          if (over <= 0) continue;
           if (born[i] < P.stroke && n < C.CAP) {
             if (over > C.CRUSH * br) crush(i);
           } else {
-            x[i] += (x[i] < PX ? -1 : 1) * over * C.SQUIRT;
-            if (over > C.STOP * br) stuck = true;
+            ghost[i] = 1; P.wait = true;
+            if (y[i] < py1 + br) { y[i] = py1 + br; oy[i] = y[i]; }
+            ox[i] = x[i] - (x[i] < PX ? -1 : 1) * C.GHOST * 0.6 * h;
           }
         }
-        if (stuck) { P.phase = "up"; P.t = 0; }
       }
     }
 
